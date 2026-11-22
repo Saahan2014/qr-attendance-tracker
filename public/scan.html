@@ -42,6 +42,8 @@
             <video id="video" playsinline muted></video>
             <div class="frame" id="frame" hidden></div>
             <button class="btn primary" id="start-camera" type="button">Start camera</button>
+            <!-- The result also shows on the camera picture, so it's visible while scanning. -->
+            <div class="cam-status" id="cam-status" hidden></div>
           </div>
           <form id="code-form" class="code-form" autocomplete="off">
             <label class="field">
@@ -117,6 +119,11 @@
       if (studentId) link.href = "/lookup?id=" + encodeURIComponent(studentId);
       clearTimeout(resetTimer);
       if (kind) resetTimer = setTimeout(showReady, MESSAGE_TIME_MS);
+      // The same result, on top of the camera picture.
+      var cam = $("cam-status");
+      cam.hidden = !cameraOn;
+      cam.className = "cam-status" + (kind ? " " + kind : "");
+      cam.textContent = kind ? big + " · " + kicker : (currentClass ? "Looking for a QR code…" : "Pick a class first");
     }
     function showReady() {
       if (!currentClass) { show("", "Waiting for a class", "Pick a class", "Choose the subject and class, then scan a badge."); return; }
@@ -135,6 +142,7 @@
       if (!$("result").className.match(/ok|warn|bad/)) showReady();
     }
     function beep(good) {
+      try { if (navigator.vibrate) navigator.vibrate(good ? 80 : [80, 60, 80]); } catch (e) { /* optional */ }
       if (!audio) return;
       var tone = audio.createOscillator(), volume = audio.createGain();
       tone.frequency.value = good ? 880 : 220;
@@ -216,14 +224,28 @@
     var scanCanvas = document.createElement("canvas");
     var scanPen = scanCanvas.getContext("2d", { willReadFrequently: true });
     var frameNumber = 0;
+    var cameraOn = false;
 
+    // Every other frame, look for a code in one of two views of the picture:
+    //  - the middle (inside the square), kept sharp so a small or far-away
+    //    badge - like one on a computer screen - still has enough detail;
+    //  - the whole picture, shrunk, for a badge held very close.
     function scanFrame() {
-      if (video.readyState === video.HAVE_ENOUGH_DATA && ++frameNumber % 3 === 0) {
-        // Shrink the frame first: decoding a smaller picture is much faster.
-        var scale = Math.min(1, 640 / video.videoWidth);
-        var w = Math.round(video.videoWidth * scale), h = Math.round(video.videoHeight * scale);
-        scanCanvas.width = w; scanCanvas.height = h;
-        var code = readQr(video, w, h, scanPen);
+      if (video.readyState === video.HAVE_ENOUGH_DATA && ++frameNumber % 2 === 0) {
+        var vw = video.videoWidth, vh = video.videoHeight, code;
+        if (frameNumber % 4 === 0) {
+          var side = Math.round(Math.min(vw, vh) * 0.8);
+          var size = Math.min(side, 800);
+          scanCanvas.width = size; scanCanvas.height = size;
+          scanPen.drawImage(video, (vw - side) / 2, (vh - side) / 2, side, side, 0, 0, size, size);
+          code = qrFromCanvas(scanPen, size, size, frameNumber % 8 === 0);
+        } else {
+          var scale = Math.min(1, 960 / Math.max(vw, vh));
+          var w = Math.round(vw * scale), h = Math.round(vh * scale);
+          scanCanvas.width = w; scanCanvas.height = h;
+          scanPen.drawImage(video, 0, 0, w, h);
+          code = qrFromCanvas(scanPen, w, h, false);
+        }
         if (code) {
           var now = Date.now();
           // Without this, a badge held up would be sent many times a second.
@@ -234,6 +256,18 @@
       requestAnimationFrame(scanFrame);
     }
 
+    async function openCamera() {
+      try {
+        // "environment" asks a phone for its back camera. Asking for a big
+        // picture matters: without it phones send a small, blurry one.
+        return await navigator.mediaDevices.getUserMedia({ audio: false, video: {
+          facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+      } catch (error) {
+        if (error && error.name === "NotAllowedError") throw error;
+        return await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+      }
+    }
+
     $("start-camera").addEventListener("click", async function () {
       audio = audio || new (window.AudioContext || window.webkitAudioContext)();
       var hint = $("camera-hint");
@@ -242,11 +276,15 @@
         return;
       }
       try {
-        // "environment" asks a phone for its back camera.
-        video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+        var stream = await openCamera();
+        // Keep refocusing where the phone allows it (ignored elsewhere).
+        try { await stream.getVideoTracks()[0].applyConstraints({ advanced: [{ focusMode: "continuous" }] }); } catch (e) { /* optional */ }
+        video.srcObject = stream;
         await video.play();
         this.hidden = true;
         $("frame").hidden = false;
+        cameraOn = true;
+        showReady();
         requestAnimationFrame(scanFrame);
       } catch (error) {
         hint.textContent = error && error.name === "NotAllowedError"
