@@ -167,10 +167,16 @@ function qrDataUrl(text) {
   return url;
 }
 
-// Look for a QR code in a picture (a camera frame or a photo). Returns its text or "".
+// Look for a QR code in what's drawn on a canvas. Returns its text or "".
+// tryInverted also looks for light-on-dark codes (slower, so not every frame).
+function qrFromCanvas(pen, width, height, tryInverted) {
+  var found = jsQR(pen.getImageData(0, 0, width, height).data, width, height,
+                   { inversionAttempts: tryInverted ? "attemptBoth" : "dontInvert" });
+  return found && found.data ? found.data.trim() : "";
+}
+
+// Draw a picture (like a photo) onto a canvas, then look for a QR code in it.
 function readQr(source, width, height, pen) {
   pen.drawImage(source, 0, 0, width, height);
-  var found = jsQR(pen.getImageData(0, 0, width, height).data, width, height,
-                   { inversionAttempts: "attemptBoth" });
-  return found && found.data ? found.data.trim() : "";
+  return qrFromCanvas(pen, width, height, true);
 }
