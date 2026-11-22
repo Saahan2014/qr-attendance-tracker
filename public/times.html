@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Late times · QR Attendance Tracker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Mono:wght@500;600&family=Instrument+Sans:wght@400;500;600&family=Noto+Sans+Gurmukhi:wght@500&display=swap">
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <header class="topbar gutter">
+    <div class="inner">
+      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">QR Attendance Tracker</span></a>
+      <nav class="tabs" aria-label="Sections">
+        <a href="/scan">Check in</a>
+        <a href="/lookup">Look up</a>
+        <a href="/dashboard">Dashboard</a>
+        <a href="/badges">Badges</a>
+        <a href="/times" aria-current="page">Late times</a>
+        <button class="signout" id="signout" type="button" hidden>Sign out</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="gutter">
+    <div class="inner view">
+      <div>
+        <h1>Late times</h1>
+        <p class="muted">A scan after the late time is marked late. Change the times for one day when classes start later, like an assembly or a special program.</p>
+      </div>
+
+      <div class="times-grid">
+        <section class="panel times-day">
+          <h2 class="panel-title">Change a day</h2>
+          <label class="field">
+            <span class="label">Date</span>
+            <input type="date" id="day">
+          </label>
+          <p class="hint" id="day-note"></p>
+          <div class="time-rows" id="time-rows"></div>
+          <div class="form-actions">
+            <button class="btn primary" type="button" id="save">Save times for this day</button>
+            <button class="btn" type="button" id="reset" hidden>Use the usual times</button>
+          </div>
+          <p class="hint">Saving also re-marks check-ins already made that day, so on time and late match the new times.</p>
+        </section>
+
+        <section class="panel">
+          <h2 class="panel-title">Usual times</h2>
+          <ul class="names" id="usual"></ul>
+          <p class="hint" style="margin-top:10px">These apply to every day you haven't changed. They're set in <span class="mono">attendance/config.py</span>.</p>
+        </section>
+      </div>
+
+      <section>
+        <h2 class="panel-title">Changed days</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr id="changes-head"><th>Date</th></tr></thead>
+            <tbody id="changes"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script src="/assets/app.js"></script>
+  <script>
+    function nextSunday() {
+      var d = new Date();
+      d.setDate(d.getDate() + ((7 - d.getDay()) % 7));
+      return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+    }
+
+    async function loadDay() {
+      var day = $("day").value;
+      if (!day) return;
+      var reply = await api("/late-times?date=" + day);
+      if (!reply.ok || $("day").value !== day) return;
+      var rows = $("time-rows");
+      rows.replaceChildren();
+      var anyChanged = false;
+      reply.data.times.forEach(function (t) {
+        anyChanged = anyChanged || t.changed;
+        var s = subjectBy(t.subject);
+        rows.append(el("label", { class: "time-row" }, [
+          el("span", { class: "subj" }, [s.name, s.pa ? el("span", { class: "pa", lang: "pa", text: s.pa }) : null]),
+          el("input", { type: "time", id: "t-" + t.subject, value: t.late_after, "data-usual": t.usual }),
+          el("span", { class: "pill " + (t.changed ? "late" : "none"), text: t.changed ? "Changed" : "Usual" })
+        ]));
+      });
+      $("reset").hidden = !anyChanged;
+      var when = day === todayStr() ? "Today, " : "";
+      $("day-note").textContent = when + prettyDate(day) + (anyChanged ? ": this day has its own times." : ": the usual times.");
+    }
+
+    async function loadChanges() {
+      var reply = await api("/late-times/changes");
+      if (!reply.ok) return;
+      var head = $("changes-head");
+      head.replaceChildren(el("th", { text: "Date" }));
+      SUBJECTS.forEach(function (s) { head.append(el("th", { text: s.name })); });
+      head.append(el("th", { text: "" }));
+      var body = $("changes");
+      body.replaceChildren();
+      if (!reply.data.changes.length) {
+        body.append(el("tr", null, [el("td", { colspan: String(SUBJECTS.length + 2), class: "muted", text: "No days changed yet. Every day uses the usual times." })]));
+        return;
+      }
+      var today = todayStr();
+      reply.data.changes.forEach(function (c) {
+        var tr = el("tr", null, [el("td", null, [
+          el("span", { class: "mono", text: c.date }), " ",
+          el("span", { class: "pill " + (c.date < today ? "none" : c.date === today ? "here" : "late"),
+                       text: c.date < today ? "Past" : c.date === today ? "Today" : "Coming up" })
+        ])]);
+        SUBJECTS.forEach(function (s) {
+          tr.append(c.times[s.key]
+            ? el("td", { class: "mono", text: prettyTime(c.times[s.key]) })
+            : el("td", { class: "muted", text: "usual" }));
+        });
+        tr.append(el("td", { class: "num" }, [el("button", { class: "btn small", type: "button", text: "Edit",
+          onclick: function () { $("day").value = c.date; loadDay(); window.scrollTo({ top: 0 }); } })]));
+        body.append(tr);
+      });
+    }
+
+    async function save(times) {
+      var day = $("day").value;
+      if (!day) { toast("Pick a date first."); return; }
+      $("save").disabled = true;
+      var reply = times
+        ? await api("/late-times/" + day, { method: "PUT", body: { times: times } })
+        : await api("/late-times/" + day, { method: "DELETE" });
+      $("save").disabled = false;
+      if (!reply.ok) { toast(reply.data.message || "Not saved. Try again."); return; }
+      toast((times ? "Saved late times for " : "Back to the usual times for ") + prettyDate(day));
+      loadDay(); loadChanges();
+    }
+
+    $("day").addEventListener("change", loadDay);
+    $("save").addEventListener("click", function () {
+      var times = {};
+      SUBJECTS.forEach(function (s) { times[s.key] = $("t-" + s.key).value; });
+      save(times);
+    });
+    $("reset").addEventListener("click", function () { save(null); });
+
+    startPage().then(function () {
+      var usual = $("usual");
+      SUBJECTS.forEach(function (s) {
+        usual.append(el("li", null, [
+          el("span", { class: "who" }, [s.name + " ", s.pa ? el("span", { class: "pa", lang: "pa", text: s.pa }) : null]),
+          el("span", { class: "time", text: "late after" }),
+          el("span", { class: "mono", text: prettyTime(s.late_after) })
+        ]));
+      });
+      $("day").value = nextSunday();
+      loadDay();
+      loadChanges();
+    }).catch(function () {});
+  </script>
+</body>
+</html>

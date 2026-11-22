@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>QR Attendance Tracker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Mono:wght@500;600&family=Instrument+Sans:wght@400;500;600&family=Noto+Sans+Gurmukhi:wght@500&display=swap">
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <header class="topbar gutter">
+    <div class="inner">
+      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">QR Attendance Tracker</span></a>
+      <nav class="tabs" aria-label="Sections">
+        <a href="/scan">Check in</a>
+        <a href="/lookup">Look up</a>
+        <a href="/dashboard">Dashboard</a>
+        <a href="/badges">Badges</a>
+        <a href="/times">Late times</a>
+        <button class="signout" id="signout" type="button" hidden>Sign out</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="gutter">
+    <div class="inner view">
+      <div>
+        <h1>Sunday attendance</h1>
+        <p class="muted">Gurmat, Gurmukhi and electives. Students hold up their badge, the scanner beeps, and the dashboard fills in.</p>
+      </div>
+      <div class="home-grid">
+        <a class="home-card" href="/scan"><strong>Check in</strong>Pick a class, then scan badges with the camera or type codes.</a>
+        <a class="home-card" href="/lookup"><strong>Look up</strong>Type a student code to see their classes and attendance.</a>
+        <a class="home-card" href="/dashboard"><strong>Dashboard</strong>Here, late and missing for every class, updating live.</a>
+        <a class="home-card" href="/badges"><strong>Badges</strong>Print QR badges, and add or edit students.</a>
+        <a class="home-card" href="/times"><strong>Late times</strong>See the usual late times, or change them for one day.</a>
+      </div>
+      <p class="hint" id="storage"></p>
+    </div>
+  </main>
+
+  <script src="/assets/app.js"></script>
+  <script>
+    startPage().then(function (status) {
+      $("storage").textContent = status.storage === "postgres"
+        ? "Saving to the online database."
+        : "Saving to attendance.db on this computer.";
+    }).catch(function () {});
+  </script>
+</body>
+</html>

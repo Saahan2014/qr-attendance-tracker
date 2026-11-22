@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Badges · QR Attendance Tracker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Mono:wght@500;600&family=Instrument+Sans:wght@400;500;600&family=Noto+Sans+Gurmukhi:wght@500&display=swap">
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <!-- GROUP 4: the badges. Each QR code holds only the student code. -->
+  <header class="topbar gutter">
+    <div class="inner">
+      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">QR Attendance Tracker</span></a>
+      <nav class="tabs" aria-label="Sections">
+        <a href="/scan">Check in</a>
+        <a href="/lookup">Look up</a>
+        <a href="/dashboard">Dashboard</a>
+        <a href="/badges" aria-current="page">Badges</a>
+        <a href="/times">Late times</a>
+        <button class="signout" id="signout" type="button" hidden>Sign out</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="gutter">
+    <div class="inner view">
+      <div class="page-head">
+        <div>
+          <h1>Badges</h1>
+          <p class="muted">Each QR code holds only the student code, never a name.</p>
+        </div>
+        <div class="form-actions">
+          <button class="btn" id="print" type="button">Print badges</button>
+          <button class="btn primary" id="add" type="button">Add student</button>
+        </div>
+      </div>
+
+      <form class="panel add-form" id="form" autocomplete="off" hidden>
+        <h3 id="form-title">Add student</h3>
+        <div class="add-grid" id="form-fields">
+          <label class="field"><span class="label">Code</span><input id="f-id" autocapitalize="characters" spellcheck="false"></label>
+          <label class="field"><span class="label">Name</span><input id="f-name"></label>
+          <label class="field"><span class="label">Grade</span><input id="f-grade" type="number" min="1" max="12"></label>
+        </div>
+        <div class="form-actions">
+          <button class="btn primary" type="submit" id="f-save">Save student</button>
+          <button class="btn" type="button" id="f-cancel">Cancel</button>
+          <span class="note" id="f-note" hidden></span>
+        </div>
+      </form>
+
+      <div class="badge-grid" id="grid"><div class="empty">Loading students…</div></div>
+    </div>
+  </main>
+
+  <script src="/assets/vendor/qrcode.js"></script>
+  <script src="/assets/app.js"></script>
+  <script>
+    var students = [];
+    var editing = "";      // the code being edited, or "" when adding
+    var armed = "";        // the badge whose Remove was pressed once
+
+    function classLine(s) {
+      return SUBJECTS.map(function (sub) {
+        var c = classById(s.classes[sub.key]);
+        return c ? sub.name + " " + c.name.replace("Level ", "") : null;
+      }).filter(Boolean).join(" · ");
+    }
+
+    function drawGrid() {
+      var grid = $("grid");
+      grid.replaceChildren();
+      if (!students.length) {
+        grid.append(el("div", { class: "empty" }, [
+          el("p", { text: "No students yet. Add them one at a time, or load 12 fake students to try the system." }),
+          el("p", { style: "margin-top:12px" }, [el("button", { class: "btn", type: "button", text: "Load 12 sample students", onclick: loadSample })])
+        ]));
+        return;
+      }
+      students.forEach(function (s) {
+        var actions = el("div", { class: "actions" }, [
+          el("button", { class: "btn small", type: "button", text: "Save PNG", onclick: function () { savePng(s); } }),
+          el("button", { class: "btn small", type: "button", text: "Edit", onclick: function () { openForm(s); } })
+        ]);
+        if (armed === s.student_id) {
+          actions.append(
+            el("button", { class: "btn small danger", type: "button", text: "Remove and erase attendance", onclick: function () { removeStudent(s); } }),
+            el("button", { class: "btn small", type: "button", text: "Keep", onclick: function () { armed = ""; drawGrid(); } }));
+        } else {
+          actions.append(el("button", { class: "btn small danger", type: "button", text: "Remove", onclick: function () { armed = s.student_id; drawGrid(); } }));
+        }
+        grid.append(el("div", { class: "badge" }, [
+          el("img", { src: qrDataUrl(s.student_id), alt: "QR code for " + s.student_id, width: "264", height: "264" }),
+          el("div", { class: "name", text: s.name }),
+          el("div", { class: "bid", text: s.student_id }),
+          el("div", { class: "bclasses", text: classLine(s) || "No classes yet" }),
+          actions
+        ]));
+      });
+    }
+
+    async function load() {
+      var reply = await api("/students");
+      if (!reply.ok) return;
+      students = reply.data.students;
+      drawGrid();
+    }
+
+    async function loadSample() {
+      var reply = await api("/students/sample", { method: "POST" });
+      if (reply.ok) { toast("Loaded " + reply.data.loaded + " sample students"); load(); }
+      else toast(reply.data.message || "Couldn't load the sample students.");
+    }
+
+    async function removeStudent(s) {
+      armed = "";
+      var reply = await api("/students/" + encodeURIComponent(s.student_id), { method: "DELETE" });
+      toast(reply.ok ? "Removed " + s.name : (reply.data.message || "Couldn't remove that student."));
+      load();
+    }
+
+    // ---------------------------------------------------------- add / edit
+    function nextCode() {
+      var max = 0;
+      students.forEach(function (s) { var m = /^STU-(\d+)$/.exec(s.student_id); if (m) max = Math.max(max, +m[1]); });
+      return "STU-" + String(max + 1).padStart(3, "0");
+    }
+    function buildClassFields() {
+      var fields = $("form-fields");
+      SUBJECTS.forEach(function (sub) {
+        var select = el("select", { id: "f-" + sub.key }, [el("option", { value: "", text: "Not taking" })]);
+        sub.classes.forEach(function (c) { select.append(el("option", { value: c.class_id, text: c.name })); });
+        fields.append(el("label", { class: "field" }, [el("span", { class: "label", text: sub.name }), select]));
+      });
+    }
+    function openForm(s) {
+      editing = s ? s.student_id : "";
+      $("form").hidden = false;
+      $("form-title").textContent = s ? "Edit " + s.student_id : "Add student";
+      $("f-id").value = s ? s.student_id : nextCode();
+      $("f-id").readOnly = !!s;
+      $("f-name").value = s ? s.name : "";
+      $("f-grade").value = s && s.grade ? s.grade : "";
+      SUBJECTS.forEach(function (sub) { $("f-" + sub.key).value = s && s.classes[sub.key] ? s.classes[sub.key] : ""; });
+      $("f-note").hidden = true;
+      $("form").scrollIntoView({ block: "nearest" });
+      $("f-name").focus();
+    }
+    $("add").addEventListener("click", function () { openForm(null); });
+    $("f-cancel").addEventListener("click", function () { $("form").hidden = true; });
+    $("print").addEventListener("click", function () { window.print(); });
+    $("form").addEventListener("submit", async function (e) {
+      e.preventDefault();
+      var classes = {};
+      SUBJECTS.forEach(function (sub) { classes[sub.key] = $("f-" + sub.key).value; });
+      $("f-save").disabled = true;
+      var reply = await api("/students", { method: "POST", body: {
+        student_id: $("f-id").value, name: $("f-name").value, grade: $("f-grade").value,
+        classes: classes, mode: editing ? "edit" : "add"
+      } });
+      $("f-save").disabled = false;
+      if (!reply.ok) { $("f-note").textContent = reply.data.message || "Not saved. Try again."; $("f-note").hidden = false; return; }
+      toast((editing ? "Updated " : "Added ") + reply.data.student.name);
+      $("form").hidden = true;
+      load();
+    });
+
+    // ---------------------------------------------------------- one badge as a picture
+    async function savePng(s) {
+      try { await document.fonts.ready; } catch (e) { /* fonts are optional */ }
+      var W = 640, H = 820;
+      var canvas = document.createElement("canvas");
+      canvas.width = W; canvas.height = H;
+      var pen = canvas.getContext("2d");
+      pen.fillStyle = "#ffffff"; pen.fillRect(0, 0, W, H);
+      pen.strokeStyle = "#d8dbe8"; pen.lineWidth = 4; pen.strokeRect(2, 2, W - 4, H - 4);
+      pen.fillStyle = "#27348b"; pen.fillRect(0, 0, W, 14);
+      var qr = await new Promise(function (ok) { var i = new Image(); i.onload = function () { ok(i); }; i.src = qrDataUrl(s.student_id); });
+      pen.imageSmoothingEnabled = false;
+      pen.drawImage(qr, 60, 44, 520, 520);
+      pen.textAlign = "center";
+      pen.fillStyle = "#151a33"; pen.font = "700 44px 'Bricolage Grotesque', sans-serif";
+      pen.fillText(s.name, W / 2, 640, W - 60);
+      pen.fillStyle = "#c9720c"; pen.font = "600 34px 'IBM Plex Mono', monospace";
+      pen.fillText(s.student_id, W / 2, 692);
+      pen.fillStyle = "#5a6182"; pen.font = "500 22px 'Instrument Sans', sans-serif";
+      pen.fillText(classLine(s), W / 2, 748, W - 60);
+      canvas.toBlob(function (blob) {
+        var link = el("a", { href: URL.createObjectURL(blob), download: s.student_id + "-" + s.name.replace(/[^A-Za-z0-9]+/g, "-") + ".png" });
+        document.body.append(link); link.click(); link.remove();
+        setTimeout(function () { URL.revokeObjectURL(link.href); }, 10000);
+      }, "image/png");
+    }
+
+    startPage().then(function () { buildClassFields(); load(); }).catch(function () {});
+  </script>
+</body>
+</html>

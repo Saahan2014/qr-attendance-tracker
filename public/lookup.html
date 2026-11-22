@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Look up · QR Attendance Tracker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Mono:wght@500;600&family=Instrument+Sans:wght@400;500;600&family=Noto+Sans+Gurmukhi:wght@500&display=swap">
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <header class="topbar gutter">
+    <div class="inner">
+      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">QR Attendance Tracker</span></a>
+      <nav class="tabs" aria-label="Sections">
+        <a href="/scan">Check in</a>
+        <a href="/lookup" aria-current="page">Look up</a>
+        <a href="/dashboard">Dashboard</a>
+        <a href="/badges">Badges</a>
+        <a href="/times">Late times</a>
+        <button class="signout" id="signout" type="button" hidden>Sign out</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="gutter">
+    <div class="inner view">
+      <div>
+        <h1>Look up a student</h1>
+        <p class="muted">Type a code to see that student's classes, today's check-ins and past attendance.</p>
+      </div>
+      <form id="lookup-form" class="lookup-bar" autocomplete="off">
+        <input id="lookup-code" aria-label="Student code" autocapitalize="characters" spellcheck="false" placeholder="STU-014">
+        <button type="submit" class="btn primary">Look up</button>
+      </form>
+      <div class="chips" id="chips" aria-label="All students"></div>
+      <div class="empty" id="empty">Type a code above, or pick a student.</div>
+      <article class="panel profile" id="card" hidden>
+        <div class="profile-top">
+          <div>
+            <p class="profile-id" id="p-id"></p>
+            <h2 id="p-name"></h2>
+            <p class="muted" id="p-grade"></p>
+          </div>
+          <img class="qr-small" id="p-qr" alt="">
+        </div>
+        <div>
+          <h3 style="margin-bottom:10px">Classes and today</h3>
+          <div class="class-rows" id="p-classes"></div>
+        </div>
+        <div>
+          <h3 style="margin-bottom:10px">Recent days</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr id="p-history-head"><th>Date</th></tr></thead>
+              <tbody id="p-history"></tbody>
+            </table>
+          </div>
+        </div>
+      </article>
+    </div>
+  </main>
+
+  <script src="/assets/vendor/qrcode.js"></script>
+  <script src="/assets/app.js"></script>
+  <script>
+    var shownId = "";
+    var students = [];
+
+    function drawChips() {
+      var box = $("chips");
+      box.replaceChildren();
+      students.forEach(function (s) {
+        box.append(el("a", {
+          class: "chip", href: "/lookup?id=" + encodeURIComponent(s.student_id),
+          "aria-current": String(s.student_id === shownId),
+          onclick: function (e) { e.preventDefault(); openStudent(s.student_id); }
+        }, [el("span", { class: "mono", text: s.student_id }), s.name]));
+      });
+    }
+
+    function entryPill(entry, withClass) {
+      if (!entry) return el("span", { class: "pill none", text: "—" });
+      return el("span", { class: "pill " + (entry.late ? "late" : "here"),
+        text: (entry.late ? "Late · " : (withClass ? "Here · " : "")) + entry.time });
+    }
+
+    async function openStudent(raw) {
+      var code = normalizeCode(raw);
+      if (!code) return;
+      shownId = code;
+      $("lookup-code").value = code;
+      history.replaceState(null, "", "/lookup?id=" + encodeURIComponent(code));
+      drawChips();
+      var reply = await api("/students/" + encodeURIComponent(code) + "?date=" + todayStr());
+      if (shownId !== code) return;   // another student was picked while we waited
+      if (!reply.ok) {
+        $("card").hidden = true; $("empty").hidden = false;
+        $("empty").textContent = reply.status === 404
+          ? "No student has the code " + code + ". Check the code, or add them on the Badges page."
+          : (reply.data.message || "Couldn't load that student. Try again.");
+        return;
+      }
+      var d = reply.data, st = d.student;
+      $("empty").hidden = true; $("card").hidden = false;
+      $("p-id").textContent = st.student_id;
+      $("p-name").textContent = st.name;
+      $("p-grade").textContent = st.grade ? "Grade " + st.grade : "";
+      $("p-qr").src = qrDataUrl(st.student_id);
+      $("p-qr").alt = "QR badge for " + st.student_id;
+
+      var rows = $("p-classes");
+      rows.replaceChildren();
+      SUBJECTS.forEach(function (s) {
+        var c = classById(st.classes[s.key]);
+        var entry = d.today[s.key];
+        var pill = !c ? el("span", { class: "pill none", text: "Not taking" })
+          : entry ? entryPill(entry, true)
+          : el("span", { class: "pill none", text: "Not checked in today" });
+        rows.append(el("div", { class: "class-row" }, [
+          el("span", { class: "subj" }, [s.name, s.pa ? el("span", { class: "pa", lang: "pa", text: s.pa }) : null]),
+          el("span", { class: "cls", text: c ? c.name : "—" }),
+          pill
+        ]));
+      });
+
+      var head = $("p-history-head");
+      head.replaceChildren(el("th", { text: "Date" }));
+      SUBJECTS.forEach(function (s) { head.append(el("th", { text: s.name })); });
+      var body = $("p-history");
+      body.replaceChildren();
+      if (!d.history.length) {
+        body.append(el("tr", null, [el("td", { colspan: String(SUBJECTS.length + 1), class: "muted", text: "No check-ins recorded yet." })]));
+      }
+      d.history.forEach(function (day) {
+        var tr = el("tr", null, [el("td", { class: "mono", text: day.date })]);
+        SUBJECTS.forEach(function (s) { tr.append(el("td", null, [entryPill(day[s.key], false)])); });
+        body.append(tr);
+      });
+    }
+
+    $("lookup-form").addEventListener("submit", function (e) {
+      e.preventDefault();
+      openStudent($("lookup-code").value);
+    });
+
+    startPage().then(async function () {
+      var reply = await api("/students");
+      students = reply.ok ? reply.data.students : [];
+      drawChips();
+      var id = new URLSearchParams(location.search).get("id");
+      if (id) openStudent(id);
+      else if (!students.length) $("empty").textContent = "No students yet. Add them on the Badges page.";
+      if (!matchMedia("(pointer: coarse)").matches && !id) $("lookup-code").focus();
+    }).catch(function () {});
+  </script>
+</body>
+</html>

@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Dashboard · QR Attendance Tracker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Mono:wght@500;600&family=Instrument+Sans:wght@400;500;600&family=Noto+Sans+Gurmukhi:wght@500&display=swap">
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <!-- GROUP 3, screen 2: the whole school at a glance. -->
+  <header class="topbar gutter">
+    <div class="inner">
+      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">QR Attendance Tracker</span></a>
+      <nav class="tabs" aria-label="Sections">
+        <a href="/scan">Check in</a>
+        <a href="/lookup">Look up</a>
+        <a href="/dashboard" aria-current="page">Dashboard</a>
+        <a href="/badges">Badges</a>
+        <a href="/times">Late times</a>
+        <button class="signout" id="signout" type="button" hidden>Sign out</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="gutter">
+    <div class="inner view">
+      <div class="page-head">
+        <div>
+          <h1>Dashboard</h1>
+          <p class="muted" id="when">Loading…</p>
+        </div>
+        <label><span class="label">Date</span><input type="date" id="date"></label>
+      </div>
+      <div class="seg" id="filter" role="group" aria-label="Show subject"></div>
+      <div class="stats">
+        <div class="stat here"><div class="big" id="n-here">0</div><div class="what">on time</div></div>
+        <div class="stat late"><div class="big" id="n-late">0</div><div class="what">late</div></div>
+        <div class="stat"><div class="big" id="n-in">0</div><div class="what" id="n-in-what">students checked in</div></div>
+      </div>
+      <div class="dash-grid">
+        <div class="table-wrap">
+          <table class="dash-table">
+            <thead><tr><th>Class</th><th class="num">Here</th><th class="num">Late</th><th class="num">Missing</th><th class="num">Enrolled</th></tr></thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <aside class="panel detail" id="detail">
+          <p class="muted">Pick a class to see who is here, late and missing.</p>
+        </aside>
+      </div>
+    </div>
+  </main>
+
+  <script src="/assets/app.js"></script>
+  <script>
+    var date = todayStr();
+    var filter = "all";
+    var picked = "";        // the class_id shown on the right
+    var lastSummary = null;
+
+    function drawFilter() {
+      subjectButtons($("filter"), true, filter, function (key) { filter = key; drawFilter(); drawSummary(); });
+    }
+
+    function drawSummary() {
+      var d = lastSummary;
+      if (!d) return;
+      var isToday = date === todayStr();
+      $("when").textContent = (isToday ? "Today, " : "") + prettyDate(date) + (isToday ? ". Updates every few seconds." : ".");
+      var body = $("rows");
+      body.replaceChildren();
+      var here = 0, late = 0, inSubject = 0, enrolled = 0;
+      SUBJECTS.forEach(function (s) {
+        if (filter !== "all" && filter !== s.key) return;
+        body.append(el("tr", { class: "subject-row" }, [el("th", { colspan: "5" },
+          [s.name, s.pa ? el("span", { class: "pa", lang: "pa", text: "  " + s.pa }) : null])]));
+        d.classes.filter(function (c) { return c.subject === s.key; }).forEach(function (c) {
+          here += c.here; late += c.late; inSubject += c.here + c.late; enrolled += c.total;
+          var tr = el("tr", { class: "class-line" + (c.total ? "" : " empty-class"), tabindex: "0",
+                              "aria-selected": String(c.class_id === picked) });
+          tr.append(el("td", { text: c.name }));
+          if (!c.total && !c.here && !c.late) tr.append(el("td", { colspan: "4", class: "num", text: "No students" }));
+          else tr.append(
+            el("td", { class: "num here", text: String(c.here) }),
+            el("td", { class: "num late", text: String(c.late) }),
+            el("td", { class: "num missing", text: String(c.missing) }),
+            el("td", { class: "num", text: String(c.total) }));
+          var pick = function () {
+            picked = c.class_id; drawSummary(); drawDetail();
+            if (matchMedia("(max-width: 820px)").matches) $("detail").scrollIntoView({ block: "start" });
+          };
+          tr.addEventListener("click", pick);
+          tr.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
+          body.append(tr);
+        });
+      });
+      $("n-here").textContent = here;
+      $("n-late").textContent = late;
+      // Each student has one class per subject, so a subject's check-ins = its students.
+      var came = filter === "all" ? d.students_checked_in : inSubject;
+      var total = filter === "all" ? d.total_students : enrolled;
+      $("n-in").replaceChildren(String(came), el("small", { text: " / " + total }));
+      $("n-in-what").textContent = filter === "all" ? "students checked in to anything" : "students in " + subjectBy(filter).name;
+    }
+
+    async function drawDetail() {
+      var box = $("detail");
+      var c = classById(picked);
+      if (!c) { box.replaceChildren(el("p", { class: "muted", text: "Pick a class to see who is here, late and missing." })); return; }
+      var reply = await api("/attendance/class?class_id=" + encodeURIComponent(picked) + "&date=" + date);
+      if (!reply.ok || picked !== c.class_id) return;
+      var d = reply.data;
+      var here = d.present.filter(function (p) { return !p.late; });
+      var late = d.present.filter(function (p) { return p.late; });
+      box.replaceChildren(el("h3", { text: c.subject.name + " · " + c.name }));
+      [["Here", here, "here"], ["Late", late, "late"], ["Missing", d.missing, "missing"]].forEach(function (group) {
+        var list = el("ul", { class: "names" });
+        if (!group[1].length) list.append(el("li", { class: "muted", text: "Nobody" }));
+        group[1].forEach(function (p) {
+          list.append(el("li", null, [
+            el("a", { class: "who", href: "/lookup?id=" + encodeURIComponent(p.student_id), text: p.name }),
+            el("span", { class: "time", text: p.time || p.student_id }),
+            el("span", { class: "pill " + group[2], text: group[0] })
+          ]));
+        });
+        box.append(el("div", null, [el("h4", { text: group[0] + " (" + group[1].length + ")" }), list]));
+      });
+    }
+
+    async function refresh() {
+      var asked = date;
+      var reply = await api("/attendance/summary?date=" + date);
+      if (!reply.ok || asked !== date) return;
+      lastSummary = reply.data;
+      drawSummary();
+      if (picked) drawDetail();
+    }
+
+    $("date").addEventListener("change", function () { date = this.value || todayStr(); refresh(); });
+
+    startPage().then(function () {
+      $("date").value = date;
+      drawFilter();
+      refresh();
+      setInterval(function () { if (!document.hidden) refresh(); }, 3000);
+    }).catch(function () {});
+  </script>
+</body>
+</html>

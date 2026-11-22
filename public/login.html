@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Sign in · QR Attendance Tracker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Mono:wght@500;600&family=Instrument+Sans:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <main class="gutter">
+    <div class="inner">
+      <form class="panel signin" id="form">
+        <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">QR Attendance Tracker</span></a>
+        <div>
+          <h1>Teacher sign in</h1>
+          <p class="muted">Student names and attendance are only shown to teachers.</p>
+        </div>
+        <label class="field">
+          <span class="label">Teacher password</span>
+          <input id="password" type="password" autocomplete="current-password" required>
+        </label>
+        <button class="btn primary" type="submit" id="go">Sign in</button>
+        <p class="note" id="note" hidden></p>
+      </form>
+    </div>
+  </main>
+
+  <script src="/assets/app.js"></script>
+  <script>
+    // Only go back to a page on this site after signing in.
+    var next = new URLSearchParams(location.search).get("next") || "/";
+    if (!/^\/(?!\/)/.test(next)) next = "/";
+
+    api("/status").then(function (reply) {
+      if (reply.ok && reply.data.setup_message) showSetup(reply.data.setup_message);
+      else if (reply.ok && reply.data.signed_in) location.replace(next);
+    });
+
+    $("form").addEventListener("submit", async function (e) {
+      e.preventDefault();
+      $("go").disabled = true;
+      var reply = await api("/login", { method: "POST", body: { password: $("password").value } });
+      $("go").disabled = false;
+      if (reply.ok) { location.replace(next); return; }
+      $("note").textContent = reply.data.message || "Couldn't sign in. Try again.";
+      $("note").hidden = false;
+      $("password").select();
+    });
+  </script>
+</body>
+</html>

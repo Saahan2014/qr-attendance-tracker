@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Check in · QR Attendance Tracker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Mono:wght@500;600&family=Instrument+Sans:wght@400;500;600&family=Noto+Sans+Gurmukhi:wght@500&display=swap">
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <!-- GROUP 3, screen 1: the check-in confirmation.
+       GROUP 4: the camera + decoder that turns a QR picture into text. -->
+  <header class="topbar gutter">
+    <div class="inner">
+      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">QR Attendance Tracker</span></a>
+      <nav class="tabs" aria-label="Sections">
+        <a href="/scan" aria-current="page">Check in</a>
+        <a href="/lookup">Look up</a>
+        <a href="/dashboard">Dashboard</a>
+        <a href="/badges">Badges</a>
+        <a href="/times">Late times</a>
+        <button class="signout" id="signout" type="button" hidden>Sign out</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="gutter">
+    <div class="inner">
+      <div class="checkin">
+        <div class="panel setup">
+          <div class="field">
+            <span class="label">Subject</span>
+            <div class="seg" id="subjects" role="group" aria-label="Subject"></div>
+          </div>
+          <label class="field">
+            <span class="label">Class</span>
+            <select id="class"></select>
+          </label>
+          <div class="camera" id="camera">
+            <video id="video" playsinline muted></video>
+            <div class="frame" id="frame" hidden></div>
+            <button class="btn primary" id="start-camera" type="button">Start camera</button>
+          </div>
+          <form id="code-form" class="code-form" autocomplete="off">
+            <label class="field">
+              <span class="label">Or type a student code</span>
+              <input id="code" autocapitalize="characters" spellcheck="false" placeholder="STU-014">
+            </label>
+            <button type="submit" class="btn primary">Check in</button>
+          </form>
+          <div class="photo-row">
+            <label class="btn" for="photo">Scan a photo instead</label>
+            <input id="photo" type="file" accept="image/*" capture="environment" hidden>
+          </div>
+          <p class="hint" id="camera-hint">Hold a badge inside the square. A USB barcode scanner also works: it types the code and presses Enter.</p>
+        </div>
+        <!-- On a phone the result sits above the camera, so it's visible while scanning. -->
+        <div class="result" id="result" aria-live="polite">
+          <div class="result-kicker" id="kicker">Loading</div>
+          <div class="result-big" id="big">One moment</div>
+          <div class="result-small" id="small"></div>
+          <a class="result-link" id="student-link" href="/lookup" hidden>See this student</a>
+        </div>
+        <div class="panel roster">
+          <div class="roster-head"><h3 id="roster-title">This class today</h3><span class="count" id="roster-count"></span></div>
+          <ul class="names" id="roster"></ul>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="/assets/vendor/jsQR.js"></script>
+  <script src="/assets/vendor/qrcode.js"></script>
+  <script src="/assets/app.js"></script>
+  <script>
+    var currentSubject = "";
+    var currentClass = "";
+    var queue = Promise.resolve();
+    var lastCode = "", lastCodeTime = 0;
+    var RESCAN_DELAY_MS = 3000;   // ignore the same badge for 3 seconds
+    var MESSAGE_TIME_MS = 6000;   // how long a result stays up
+    var audio = null;
+
+    // ---------------------------------------------------------- the picker
+    function drawPicker() {
+      subjectButtons($("subjects"), false, currentSubject, function (key) {
+        currentSubject = key; remember("subject", key);
+        currentClass = ""; remember("class", "");
+        drawPicker(); showReady(); refreshRoster();
+      });
+      var box = $("class");
+      box.replaceChildren(el("option", { value: "", text: "Pick a class" }));
+      subjectBy(currentSubject).classes.forEach(function (c) {
+        box.append(el("option", { value: c.class_id, text: c.name }));
+      });
+      var saved = classById(currentClass);
+      box.value = saved && saved.subject.key === currentSubject ? currentClass : "";
+      currentClass = box.value;
+    }
+    $("class").addEventListener("change", function () {
+      currentClass = this.value; remember("class", currentClass);
+      lastCode = "";   // a badge may be scanned again for a different class
+      showReady(); refreshRoster();
+    });
+
+    // ---------------------------------------------------------- the result panel
+    var resetTimer = null;
+    function show(kind, kicker, big, small, studentId) {
+      $("result").className = "result" + (kind ? " " + kind : "");
+      $("kicker").textContent = kicker;
+      $("big").textContent = big;
+      $("small").textContent = small;
+      var link = $("student-link");
+      link.hidden = !studentId;
+      if (studentId) link.href = "/lookup?id=" + encodeURIComponent(studentId);
+      clearTimeout(resetTimer);
+      if (kind) resetTimer = setTimeout(showReady, MESSAGE_TIME_MS);
+    }
+    function showReady() {
+      if (!currentClass) { show("", "Waiting for a class", "Pick a class", "Choose the subject and class, then scan a badge."); return; }
+      var c = classById(currentClass);
+      var lateAfter = todayTimes[c.subject.key] || c.subject.late_after;
+      show("", c.subject.name + " · " + c.name, "Ready to scan",
+           "Hold a badge up to the camera or type a code. Late after " + prettyTime(lateAfter) + " today.");
+    }
+
+    // Today's late times (a day can have its own times; see the Late times page).
+    var todayTimes = {};
+    async function loadTodayTimes() {
+      var reply = await api("/late-times?date=" + todayStr());
+      if (!reply.ok) return;
+      reply.data.times.forEach(function (t) { todayTimes[t.subject] = t.late_after; });
+      if (!$("result").className.match(/ok|warn|bad/)) showReady();
+    }
+    function beep(good) {
+      if (!audio) return;
+      var tone = audio.createOscillator(), volume = audio.createGain();
+      tone.frequency.value = good ? 880 : 220;
+      volume.gain.value = 0.15;
+      tone.connect(volume).connect(audio.destination);
+      tone.start(); tone.stop(audio.currentTime + (good ? 0.15 : 0.4));
+    }
+
+    // ---------------------------------------------------------- checking in
+    // Scans wait in line, so two quick scans never trip over each other.
+    function checkIn(raw) {
+      queue = queue.then(function () { return sendCheckIn(raw); }).catch(function () {});
+    }
+    async function sendCheckIn(raw) {
+      var code = normalizeCode(raw);
+      if (!code) return;
+      if (!currentClass) { show("bad", "No class picked", "Pick a class first", "Choose the subject and class, then scan again."); beep(false); return; }
+      var c = classById(currentClass);
+      var reply = await api("/checkin", { method: "POST", body: {
+        student_id: code, class_id: currentClass, date: todayStr(), scanned_at: nowHHMM()
+      } });
+      var d = reply.data;
+      if (d.status === "checked_in" && !d.late) {
+        show("ok", "Checked in · " + c.subject.name + " " + c.name, d.name, "On time at " + d.time + ".", d.student_id); beep(true);
+      } else if (d.status === "checked_in") {
+        show("warn", "Late · " + c.subject.name + " " + c.name, d.name, "Checked in at " + d.time + ".", d.student_id); beep(true);
+      } else if (d.status === "already_checked_in") {
+        show("warn", "Already checked in", d.name, c.name + " at " + d.time + ". The first scan counts.", d.student_id); beep(false);
+      } else if (d.status === "not_in_class") {
+        show("bad", "Wrong class", d.name, "Not in " + c.name + ". " + (d.belongs_in
+          ? "Their " + c.subject.name + " class is " + d.belongs_in + "."
+          : "They aren't signed up for " + c.subject.name + "."), d.student_id); beep(false);
+      } else if (d.status === "unknown_id") {
+        show("bad", "Unknown badge", d.student_id || code, "That code isn't on the student list. Check the badge, or add the student on the Badges page."); beep(false);
+      } else if (d.status === "signed_out") {
+        return;
+      } else {
+        show("bad", "Not saved", "Try again", d.message || "The check-in didn't reach the server. Check the connection and scan again."); beep(false);
+      }
+      refreshRoster();
+    }
+    $("code-form").addEventListener("submit", function (e) {
+      e.preventDefault();
+      var box = $("code"), value = box.value;
+      box.value = "";
+      if (value.trim()) checkIn(value);
+    });
+
+    // ---------------------------------------------------------- today's list
+    async function refreshRoster() {
+      var list = $("roster");
+      var c = classById(currentClass);
+      $("roster-title").textContent = c ? c.subject.name + " " + c.name + " today" : "This class today";
+      if (!c) { $("roster-count").textContent = ""; list.replaceChildren(el("li", { class: "muted", text: "Pick a class to see its students." })); return; }
+      var reply = await api("/attendance/class?class_id=" + encodeURIComponent(currentClass) + "&date=" + todayStr());
+      if (!reply.ok || currentClass !== c.class_id) return;   // the class changed while we waited
+      var d = reply.data;
+      $("roster-count").textContent = d.count + " of " + d.total + " in";
+      list.replaceChildren();
+      if (!d.total) { list.append(el("li", { class: "muted", text: "No students are in this class yet. Add them on the Badges page." })); return; }
+      d.present.forEach(function (p) {
+        list.append(el("li", null, [
+          el("a", { class: "who", href: "/lookup?id=" + encodeURIComponent(p.student_id), text: p.name }),
+          el("span", { class: "time", text: p.time }),
+          el("span", { class: "pill " + (p.late ? "late" : "here"), text: p.late ? "Late" : "Here" })
+        ]));
+      });
+      d.missing.forEach(function (p) {
+        list.append(el("li", null, [
+          el("a", { class: "who", href: "/lookup?id=" + encodeURIComponent(p.student_id), text: p.name }),
+          el("span", { class: "time", text: p.student_id }),
+          el("span", { class: "pill none", text: "Not yet" })
+        ]));
+      });
+    }
+
+    // ---------------------------------------------------------- the camera (GROUP 4)
+    var video = $("video");
+    var scanCanvas = document.createElement("canvas");
+    var scanPen = scanCanvas.getContext("2d", { willReadFrequently: true });
+    var frameNumber = 0;
+
+    function scanFrame() {
+      if (video.readyState === video.HAVE_ENOUGH_DATA && ++frameNumber % 3 === 0) {
+        // Shrink the frame first: decoding a smaller picture is much faster.
+        var scale = Math.min(1, 640 / video.videoWidth);
+        var w = Math.round(video.videoWidth * scale), h = Math.round(video.videoHeight * scale);
+        scanCanvas.width = w; scanCanvas.height = h;
+        var code = readQr(video, w, h, scanPen);
+        if (code) {
+          var now = Date.now();
+          // Without this, a badge held up would be sent many times a second.
+          if (!(code === lastCode && now - lastCodeTime < RESCAN_DELAY_MS)) checkIn(code);
+          lastCode = code; lastCodeTime = now;
+        }
+      }
+      requestAnimationFrame(scanFrame);
+    }
+
+    $("start-camera").addEventListener("click", async function () {
+      audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+      var hint = $("camera-hint");
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        hint.textContent = "This browser won't open the camera here. Use Scan a photo instead, or type the code.";
+        return;
+      }
+      try {
+        // "environment" asks a phone for its back camera.
+        video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+        await video.play();
+        this.hidden = true;
+        $("frame").hidden = false;
+        requestAnimationFrame(scanFrame);
+      } catch (error) {
+        hint.textContent = error && error.name === "NotAllowedError"
+          ? "Camera access was blocked. Allow the camera in the browser's address bar, or use Scan a photo instead."
+          : "No camera was found. Use Scan a photo instead, or type the code.";
+      }
+    });
+
+    // A photo from the phone's camera app: try a few sizes, since photos are big.
+    $("photo").addEventListener("change", async function () {
+      var file = this.files && this.files[0];
+      this.value = "";
+      if (!file) return;
+      audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+      show("", "Reading photo", "Looking for a QR code…", "This takes a second.");
+      var url = URL.createObjectURL(file), code = "";
+      try {
+        var img = await new Promise(function (ok, fail) { var i = new Image(); i.onload = function () { ok(i); }; i.onerror = fail; i.src = url; });
+        var biggest = Math.max(img.naturalWidth, img.naturalHeight);
+        var sizes = [1000, 1600, 700, 2400];
+        for (var i = 0; i < sizes.length && !code; i++) {
+          var scale = Math.min(1, sizes[i] / biggest);
+          var canvas = document.createElement("canvas");
+          canvas.width = Math.round(img.naturalWidth * scale); canvas.height = Math.round(img.naturalHeight * scale);
+          code = readQr(img, canvas.width, canvas.height, canvas.getContext("2d", { willReadFrequently: true }));
+          if (scale === 1) break;
+        }
+      } catch (e) { code = ""; }
+      URL.revokeObjectURL(url);
+      if (!code) { show("bad", "No QR code found", "Try again", "Hold the badge flat, fill most of the photo with it, and avoid glare."); beep(false); return; }
+      checkIn(code);
+    });
+
+    // ---------------------------------------------------------- start
+    startPage().then(function () {
+      currentSubject = subjectBy(recall("subject")) ? recall("subject") : SUBJECTS[0].key;
+      currentClass = recall("class");
+      drawPicker(); showReady(); refreshRoster(); loadTodayTimes();
+      setInterval(function () { if (!document.hidden) refreshRoster(); }, 4000);
+      setInterval(function () { if (!document.hidden) loadTodayTimes(); }, 60000);
+      if (!matchMedia("(pointer: coarse)").matches) $("code").focus();
+    }).catch(function () {});
+  </script>
+</body>
+</html>
